@@ -495,6 +495,7 @@ def main():
             os.path.join(raw_dir, 'calib.json'),
             os.path.join(raw_dir, 'road', 'calib.json'),
             os.path.join(raw_dir, '..', 'calib.json'),
+            os.path.join(raw_dir, '..', 'support_info', 'calib.json'),
         ]:
             if os.path.exists(candidate):
                 calib_path = candidate
@@ -596,12 +597,56 @@ def main():
         )
 
     # Get all timestamps from first camera
+    # Image filenames are either "{timestamp}.png" or "cam{N}_{timestamp}.png"
     all_image_files = sorted(
         glob.glob(os.path.join(cam_image_dir, '*.png')) +
         glob.glob(os.path.join(cam_image_dir, '*.jpg'))
     )
-    all_timestamps = [os.path.splitext(os.path.basename(f))[0] for f in all_image_files]
+
+    def extract_timestamp(filepath):
+        """Extract timestamp from filename, handling cam{N}_ prefix."""
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        # Handle "cam3_1743583120682" format -> "1743583120682"
+        if '_' in basename:
+            parts = basename.split('_', 1)
+            if parts[0].startswith('cam') and parts[0][3:].isdigit():
+                return parts[1]
+        return basename
+
+    all_timestamps = [extract_timestamp(f) for f in all_image_files]
+    # Also store the original filenames for lookup
+    ts_to_original_filename = {}
+    for f in all_image_files:
+        ts = extract_timestamp(f)
+        if ts not in ts_to_original_filename:
+            ts_to_original_filename[ts] = {}
+        # Key by camera folder parent
+        ts_to_original_filename[ts][first_cam] = os.path.basename(f)
+
+    # Discover filename patterns for all cameras
+    for cam_name in args.cameras:
+        for img_dir_candidate in [
+            os.path.join(road_cameras_dir, cam_name),
+            os.path.join(raw_dir, 'img', cam_name),
+        ]:
+            if not os.path.exists(img_dir_candidate):
+                continue
+            cam_files = sorted(
+                glob.glob(os.path.join(img_dir_candidate, '*.png')) +
+                glob.glob(os.path.join(img_dir_candidate, '*.jpg'))
+            )
+            for cf in cam_files:
+                ts = extract_timestamp(cf)
+                if ts not in ts_to_original_filename:
+                    ts_to_original_filename[ts] = {}
+                ts_to_original_filename[ts][cam_name] = os.path.basename(cf)
+            break
+
     print(f"Found {len(all_timestamps)} frames from {first_cam}")
+    if all_timestamps:
+        print(f"  Sample timestamp: {all_timestamps[0]}")
+        sample_fn = ts_to_original_filename.get(all_timestamps[0], {}).get(first_cam, 'N/A')
+        print(f"  Sample filename: {sample_fn}")
 
     # Apply frame selection
     if args.end_frame < 0:
@@ -634,17 +679,35 @@ def main():
             params = camera_params[cam_name]
             cam_id = params['cam_id']
 
-            # Find the image
+            # Find the image using the original filename mapping
+            img_path = None
+            original_fn = ts_to_original_filename.get(ts, {}).get(cam_name)
             for img_dir_candidate in [
                 os.path.join(road_cameras_dir, cam_name),
                 os.path.join(raw_dir, 'img', cam_name),
             ]:
-                img_path = None
+                if not os.path.exists(img_dir_candidate):
+                    continue
+                # Try original filename first (handles cam{N}_ prefix)
+                if original_fn:
+                    candidate = os.path.join(img_dir_candidate, original_fn)
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
+                # Fallback: try plain timestamp
                 for ext in ['.png', '.jpg']:
                     candidate = os.path.join(img_dir_candidate, f'{ts}{ext}')
                     if os.path.exists(candidate):
                         img_path = candidate
                         break
+                # Fallback: try cam{key}_{ts} pattern
+                if img_path is None:
+                    cam_key = pinhole_cam_mapping.get(cam_name, cam_name)
+                    for ext in ['.png', '.jpg']:
+                        candidate = os.path.join(img_dir_candidate, f'{cam_key}_{ts}{ext}')
+                        if os.path.exists(candidate):
+                            img_path = candidate
+                            break
                 if img_path:
                     break
 
@@ -695,9 +758,22 @@ def main():
 
         print(f"Found {len(pcd_files)} PCD files in {lidar_dir}")
 
+        # Build PCD timestamp lookup (handles prefixed filenames)
+        pcd_ts_map = {}
+        for pf in pcd_files:
+            pcd_basename = os.path.splitext(os.path.basename(pf))[0]
+            # Handle potential prefix like "merged_1743583120682"
+            if '_' in pcd_basename:
+                pcd_ts_candidate = pcd_basename.rsplit('_', 1)[-1]
+                if pcd_ts_candidate.isdigit():
+                    pcd_ts_map[pcd_ts_candidate] = pf
+            pcd_ts_map[pcd_basename] = pf
+
         # Load PCDs matching selected timestamps
         for ts in tqdm(selected_timestamps, desc="Loading PCDs"):
-            pcd_path = os.path.join(lidar_dir, f'{ts}.pcd')
+            pcd_path = pcd_ts_map.get(ts)
+            if pcd_path is None:
+                pcd_path = os.path.join(lidar_dir, f'{ts}.pcd')
             if not os.path.exists(pcd_path):
                 # Try finding any PCD in directory (single frame case)
                 if len(pcd_files) == 1:
