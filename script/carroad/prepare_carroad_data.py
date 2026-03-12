@@ -203,19 +203,73 @@ def read_pcd_file(pcd_path):
 
 # ─── Label parsing ────────────────────────────────────────────────────
 
-def parse_labels(label_dir, frame_timestamps):
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    """
+    Convert Euler angles (roll, pitch, yaw) to 3x3 rotation matrix.
+    Convention: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    """
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+
+    return Rz @ Ry @ Rx
+
+
+# Label class name normalization
+LABEL_NORMALIZE = {
+    'car': 'vehicle',
+    'suv': 'vehicle',
+    'truck': 'vehicle',
+    'bus': 'vehicle',
+    'van': 'vehicle',
+    'pickup': 'vehicle',
+    'non_motor_rider': 'cyclist',
+    'cyclist': 'cyclist',
+    'bicycle': 'cyclist',
+    'motorcycle': 'cyclist',
+    'pedestrian': 'pedestrian',
+    'person': 'pedestrian',
+    'sign': 'sign',
+    'misc': 'misc',
+    'cone': 'misc',
+    'barrier': 'misc',
+}
+
+
+def parse_labels(label_dir, selected_timestamps):
     """
     Parse road_labels to extract object tracking info.
 
-    Expected label format per frame (JSON or txt):
-    Each label file contains objects with:
-      - track_id, class, bbox3d (cx, cy, cz, l, w, h, heading)
+    Actual label JSON format (one file per timestamp):
+    {
+        "timestamp": "1742877424148",
+        "image_file": { ... },
+        "pcd_file": "...",
+        "object": [
+            {
+                "id": 1,
+                "label": "Suv",
+                "x": -62.44, "y": -4.16, "z": -1.53,
+                "length": 4.9, "width": 2.36, "height": 1.7,
+                "roll": 0.0, "pitch": 0.017, "yaw": 3.07,
+                "occlusion": 0, "num_points": 1266,
+                "vx": 0, "vy": 0
+            }, ...
+        ]
+    }
+
+    Output track_info.txt format (extended with roll/pitch/yaw):
+        frame_id track_id class score height width length cx cy cz roll pitch yaw
 
     Returns:
         track_info_lines: list of strings for track_info.txt
         track_camera_vis: dict for track_camera_vis.json
     """
-    track_info_lines = ['frame_id track_id class score height width length cx cy cz heading']
+    track_info_lines = ['frame_id track_id class score height width length cx cy cz roll pitch yaw']
     track_camera_vis = {}
 
     if not os.path.exists(label_dir):
@@ -223,30 +277,51 @@ def parse_labels(label_dir, frame_timestamps):
         return track_info_lines, track_camera_vis
 
     # Try to find label files
-    label_files = sorted(
-        glob.glob(os.path.join(label_dir, '*.json')) +
-        glob.glob(os.path.join(label_dir, '*.txt'))
-    )
+    label_files = []
+    for subdir in ['interpolation_labels', 'ori_labels', '']:
+        search_dir = os.path.join(label_dir, subdir) if subdir else label_dir
+        if not os.path.exists(search_dir):
+            continue
+        found = sorted(glob.glob(os.path.join(search_dir, '*.json')))
+        if found:
+            label_files = found
+            print(f"Using labels from: {search_dir}")
+            break
 
     if not label_files:
-        # Check subdirectories
-        for subdir in ['interpolation_labels', 'ori_labels']:
-            subpath = os.path.join(label_dir, subdir)
-            if os.path.exists(subpath):
-                label_files = sorted(
-                    glob.glob(os.path.join(subpath, '*.json')) +
-                    glob.glob(os.path.join(subpath, '*.txt'))
-                )
-                if label_files:
-                    break
+        # Also try .txt
+        for subdir in ['interpolation_labels', 'ori_labels', '']:
+            search_dir = os.path.join(label_dir, subdir) if subdir else label_dir
+            if not os.path.exists(search_dir):
+                continue
+            found = sorted(glob.glob(os.path.join(search_dir, '*.txt')))
+            if found:
+                label_files = found
+                print(f"Using labels from: {search_dir}")
+                break
 
     if not label_files:
         print(f"No label files found in {label_dir}")
         return track_info_lines, track_camera_vis
 
-    print(f"Found {len(label_files)} label files in {label_dir}")
+    print(f"Found {len(label_files)} label files")
 
-    for frame_idx, label_file in enumerate(label_files):
+    # Build a lookup: timestamp -> label_file for matching
+    ts_to_label = {}
+    for lf in label_files:
+        basename = os.path.splitext(os.path.basename(lf))[0]
+        ts_to_label[basename] = lf
+
+    # Process labels matching selected timestamps
+    for frame_idx, ts in enumerate(selected_timestamps):
+        label_file = ts_to_label.get(ts)
+        if label_file is None:
+            # Try matching by index if timestamps don't match filenames
+            if frame_idx < len(label_files):
+                label_file = label_files[frame_idx]
+            else:
+                continue
+
         ext = os.path.splitext(label_file)[1].lower()
         objects = []
 
@@ -254,71 +329,55 @@ def parse_labels(label_dir, frame_timestamps):
             with open(label_file, 'r') as f:
                 data = json.load(f)
 
-            # Handle various JSON formats
-            if isinstance(data, list):
+            # Handle our actual format: {"timestamp": ..., "object": [...]}
+            if isinstance(data, dict) and 'object' in data:
+                objects = data['object']
+            elif isinstance(data, dict) and 'objects' in data:
+                objects = data['objects']
+            elif isinstance(data, list):
                 objects = data
-            elif isinstance(data, dict):
-                if 'objects' in data:
-                    objects = data['objects']
-                elif 'annotations' in data:
-                    objects = data['annotations']
-                elif 'labels' in data:
-                    objects = data['labels']
-                else:
-                    # Try to interpret as single object dict
-                    objects = [data]
-
-        elif ext == '.txt':
-            with open(label_file, 'r') as f:
-                lines = f.readlines()
-            for line in lines:
-                parts = line.strip().split()
-                if len(parts) >= 10:
-                    try:
-                        obj = {
-                            'track_id': int(parts[0]),
-                            'class': parts[1],
-                            'height': float(parts[2]),
-                            'width': float(parts[3]),
-                            'length': float(parts[4]),
-                            'cx': float(parts[5]),
-                            'cy': float(parts[6]),
-                            'cz': float(parts[7]),
-                            'heading': float(parts[8]),
-                        }
-                        if len(parts) > 9:
-                            obj['score'] = float(parts[9])
-                        objects.append(obj)
-                    except (ValueError, IndexError):
-                        continue
 
         for obj in objects:
-            track_id = obj.get('track_id', obj.get('id', obj.get('tracking_id', -1)))
-            obj_class = obj.get('class', obj.get('type', obj.get('category', 'vehicle')))
-            score = obj.get('score', obj.get('confidence', 1.0))
+            track_id = obj.get('id', obj.get('track_id', -1))
+            raw_label = obj.get('label', obj.get('class', obj.get('type', 'vehicle')))
+            normalized_class = LABEL_NORMALIZE.get(raw_label.lower(), 'vehicle')
 
-            # 3D bbox
-            height = obj.get('height', obj.get('h', 1.5))
-            width = obj.get('width', obj.get('w', 1.8))
-            length = obj.get('length', obj.get('l', 4.5))
-            cx = obj.get('cx', obj.get('x', 0))
-            cy = obj.get('cy', obj.get('y', 0))
-            cz = obj.get('cz', obj.get('z', 0))
-            heading = obj.get('heading', obj.get('yaw', obj.get('rotation_y', 0)))
+            # Skip non-interesting classes
+            if normalized_class in ['sign', 'misc']:
+                continue
+
+            score = 1.0 - obj.get('occlusion', 0) * 0.3  # rough occlusion-based score
+
+            # 3D bbox (in virtualLidar world frame)
+            height = float(obj.get('height', 1.5))
+            width = float(obj.get('width', 1.8))
+            length = float(obj.get('length', 4.5))
+            cx = float(obj.get('x', 0))
+            cy = float(obj.get('y', 0))
+            cz = float(obj.get('z', 0))
+            roll = float(obj.get('roll', 0))
+            pitch = float(obj.get('pitch', 0))
+            yaw = float(obj.get('yaw', 0))
 
             if track_id < 0:
                 continue
 
-            line = f"{frame_idx} {track_id} {obj_class} {score:.2f} {height:.3f} {width:.3f} {length:.3f} {cx:.3f} {cy:.3f} {cz:.3f} {heading:.4f}"
+            # Write extended format with full roll/pitch/yaw
+            line = (f"{frame_idx} {track_id} {normalized_class} {score:.2f} "
+                    f"{height:.4f} {width:.4f} {length:.4f} "
+                    f"{cx:.6f} {cy:.6f} {cz:.6f} "
+                    f"{roll:.8f} {pitch:.8f} {yaw:.8f}")
             track_info_lines.append(line)
 
-            # All cameras can see (roadside, wide coverage)
+            # All pinhole cameras can potentially see (roadside coverage)
             tid = str(track_id)
             fid = str(frame_idx)
             if tid not in track_camera_vis:
                 track_camera_vis[tid] = {}
             track_camera_vis[tid][fid] = [0, 1, 2, 3]
 
+    print(f"Parsed {len(track_info_lines) - 1} tracklet entries "
+          f"from {len(selected_timestamps)} frames")
     return track_info_lines, track_camera_vis
 
 

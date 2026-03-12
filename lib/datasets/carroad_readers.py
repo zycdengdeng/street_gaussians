@@ -99,33 +99,44 @@ def _image_filename_to_cam(basename):
 
 # ─── Object tracking ───────────────────────────────────────────────────
 
+def _euler_to_rotation_matrix(roll, pitch, yaw):
+    """
+    Convert Euler angles (roll, pitch, yaw) to 3x3 rotation matrix.
+    Convention: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    """
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+
+    return Rz @ Ry @ Rx
+
+
 def _make_obj_pose_world(box_info):
     """
     Create 4x4 object pose in world frame.
-    box_info: [cx, cy, cz, heading]  (heading = yaw around Z axis)
+    box_info: [cx, cy, cz, roll, pitch, yaw]  (full 3D rotation)
     Returns: obj_pose_world (4x4), obj_pose_flat (7,) [x,y,z,qw,qx,qy,qz]
     """
-    tx, ty, tz, heading = box_info
-    c = math.cos(heading)
-    s = math.sin(heading)
-    rotz = np.array([[c, -s, 0],
-                     [s,  c, 0],
-                     [0,  0, 1]])
+    import torch as _torch
+
+    tx, ty, tz = box_info[0], box_info[1], box_info[2]
+    roll, pitch, yaw = box_info[3], box_info[4], box_info[5]
+
+    R = _euler_to_rotation_matrix(roll, pitch, yaw)
 
     pose = np.eye(4)
-    pose[:3, :3] = rotz
+    pose[:3, :3] = R
     pose[:3, 3] = np.array([tx, ty, tz])
 
-    rot_torch = torch_import().from_numpy(pose[:3, :3]).float().unsqueeze(0)
+    rot_torch = _torch.from_numpy(R).float().unsqueeze(0)
     quat = matrix_to_quaternion(rot_torch).squeeze(0).numpy()
     quat = quat / np.linalg.norm(quat)
     flat = np.concatenate([pose[:3, 3], quat])  # [x, y, z, qw, qx, qy, qz]
     return pose, flat
-
-
-def torch_import():
-    import torch
-    return torch
 
 
 def _load_track_info(datadir, selected_frames, cameras, num_frames_total):
@@ -155,6 +166,11 @@ def _load_track_info(datadir, selected_frames, cameras, num_frames_total):
     header = lines[0]
     lines = lines[1:]  # skip header
 
+    # Detect format: old (11 columns with heading) or new (13 columns with roll/pitch/yaw)
+    has_full_rotation = 'roll' in header.lower() or (
+        len(lines) > 0 and len(lines[0].split()) >= 13
+    )
+
     # Load visibility if available
     track_vis = {}
     if os.path.exists(track_vis_path):
@@ -170,7 +186,8 @@ def _load_track_info(datadir, selected_frames, cameras, num_frames_total):
 
     for line in lines:
         parts = line.split()
-        if len(parts) < 11:
+        min_cols = 13 if has_full_rotation else 11
+        if len(parts) < min_cols:
             continue
         frame_id = int(parts[0])
         track_id = int(parts[1])
@@ -220,8 +237,13 @@ def _load_track_info(datadir, selected_frames, cameras, num_frames_total):
         frame_id = int(parts[0])
         track_id = int(parts[1])
         if start_frame <= frame_id <= end_frame:
-            # box_info: cx, cy, cz, heading
-            box_info = [float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10])]
+            # box_info: cx, cy, cz, roll, pitch, yaw
+            cx, cy, cz = float(parts[7]), float(parts[8]), float(parts[9])
+            if has_full_rotation:
+                roll, pitch, yaw = float(parts[10]), float(parts[11]), float(parts[12])
+            else:
+                roll, pitch, yaw = 0.0, 0.0, float(parts[10])
+            box_info = [cx, cy, cz, roll, pitch, yaw]
             _, pose_flat = _make_obj_pose_world(box_info)
 
             frame_idx = frame_id - start_frame
