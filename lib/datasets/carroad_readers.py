@@ -340,37 +340,64 @@ def _build_pointcloud(datadir, selected_frames, cameras, num_frames, intrinsics,
             if all_colors.max() > 1.0:
                 all_colors = all_colors / 255.0
 
-            # For each frame, separate background and object points
-            for fi in range(num_frames):
-                frame = start_frame + fi
-                points_obj_mask = np.zeros(all_points.shape[0], dtype=bool)
+            # Separate background and object points across all frames.
+            # Optimization: collect all unique object poses across all frames,
+            # use coarse distance pre-filter before expensive bbox check.
+            print(f"Separating background/object points ({len(all_points)} pts, {num_frames} frames)...")
+            global_obj_mask = np.zeros(all_points.shape[0], dtype=bool)
 
-                # Check which points fall inside object bboxes
+            # Pre-compute homogeneous points once
+            pts_h = np.concatenate([all_points, np.ones((len(all_points), 1))], axis=-1)
+
+            for fi in range(num_frames):
                 frame_tracklets = tracklets[fi]
+                n_valid = int(np.sum(frame_tracklets[:, 0] >= 0))
+                if n_valid == 0:
+                    continue
+                if fi % 10 == 0:
+                    print(f"  Frame {fi}/{num_frames}: {n_valid} objects")
+
                 for t_info in frame_tracklets:
                     track_id = int(t_info[0])
-                    if track_id >= 0 and track_id in object_info:
-                        obj_pose = np.eye(4)
-                        obj_pose[:3, :3] = quaternion_to_matrix_numpy(t_info[4:8])
-                        obj_pose[:3, 3] = t_info[1:4]
-                        world2local = np.linalg.inv(obj_pose)
+                    if track_id < 0 or track_id not in object_info:
+                        continue
 
-                        pts_h = np.concatenate([all_points, np.ones((len(all_points), 1))], axis=-1)
-                        pts_local = (pts_h @ world2local.T)[:, :3]
+                    obj_center = t_info[1:4]
+                    length = object_info[track_id]['length']
+                    width = object_info[track_id]['width']
+                    height = object_info[track_id]['height']
+                    max_half_diag = np.sqrt(length**2 + width**2 + height**2) / 2.0
 
-                        length = object_info[track_id]['length']
-                        width = object_info[track_id]['width']
-                        height = object_info[track_id]['height']
-                        bbox = [[-length / 2, -width / 2, -height / 2],
-                                [length / 2, width / 2, height / 2]]
-                        corners = bbox_to_corner3d(bbox)
-                        in_bbox = inbbox_points(pts_local, corners)
-                        points_obj_mask |= in_bbox
+                    # Coarse distance filter: only check points near the object
+                    dists = np.linalg.norm(all_points - obj_center[None, :], axis=1)
+                    near_mask = dists < max_half_diag * 1.2
+
+                    if near_mask.sum() == 0:
+                        continue
+
+                    obj_pose = np.eye(4)
+                    obj_pose[:3, :3] = quaternion_to_matrix_numpy(t_info[4:8])
+                    obj_pose[:3, 3] = obj_center
+                    world2local = np.linalg.inv(obj_pose)
+
+                    pts_local = (pts_h[near_mask] @ world2local.T)[:, :3]
+
+                    bbox = [[-length / 2, -width / 2, -height / 2],
+                            [length / 2, width / 2, height / 2]]
+                    corners = bbox_to_corner3d(bbox)
+                    in_bbox = inbbox_points(pts_local, corners)
+
+                    if in_bbox.any():
+                        # Map back to global indices
+                        near_indices = np.where(near_mask)[0]
+                        global_obj_mask[near_indices[in_bbox]] = True
                         points_xyz_dict[f'obj_{track_id:03d}'].append(pts_local[in_bbox])
-                        points_rgb_dict[f'obj_{track_id:03d}'].append(all_colors[in_bbox])
+                        points_rgb_dict[f'obj_{track_id:03d}'].append(all_colors[near_mask][in_bbox])
 
-                points_xyz_dict['bkgd'].append(all_points[~points_obj_mask])
-                points_rgb_dict['bkgd'].append(all_colors[~points_obj_mask])
+            # Background = all non-object points
+            points_xyz_dict['bkgd'].append(all_points[~global_obj_mask])
+            points_rgb_dict['bkgd'].append(all_colors[~global_obj_mask])
+            print(f"  Background: {(~global_obj_mask).sum()} pts, Object: {global_obj_mask.sum()} pts")
 
         elif 'pointcloud' in pcd_data:
             # Waymo-style format with per-frame data
