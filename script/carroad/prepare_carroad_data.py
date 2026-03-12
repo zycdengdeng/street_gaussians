@@ -421,20 +421,23 @@ def generate_lidar_depth_map(points_3d, K, R_w2c, t_w2c, width, height,
 
     u_valid = u[mask].astype(np.int32)
     v_valid = v[mask].astype(np.int32)
-    d_valid = depth[mask]
+    d_valid = depth[mask].astype(np.float32)
 
-    # Sparse depth map (nearest depth per pixel)
-    depth_map = np.zeros((height, width), dtype=np.float32)
-    depth_count = np.zeros((height, width), dtype=np.int32)
+    # Sparse depth map - vectorized: keep minimum depth per pixel
+    # Flatten 2D pixel coords to 1D index
+    pixel_idx = v_valid * width + u_valid  # (N,)
 
-    for i in range(len(u_valid)):
-        px, py = u_valid[i], v_valid[i]
-        if depth_count[py, px] == 0 or d_valid[i] < depth_map[py, px]:
-            depth_map[py, px] = d_valid[i]
-            depth_count[py, px] = 1
+    # Sort by depth descending so that np.put overwrites with smaller depths last
+    order = np.argsort(-d_valid)
+    pixel_idx = pixel_idx[order]
+    d_sorted = d_valid[order]
+
+    depth_map = np.zeros(height * width, dtype=np.float32)
+    np.put(depth_map, pixel_idx, d_sorted)
+    depth_map = depth_map.reshape(height, width)
 
     # Return sparse depth as mask + values
-    valid_mask = depth_count > 0
+    valid_mask = depth_map > 0
     valid_values = depth_map[valid_mask]
 
     return {'mask': valid_mask, 'value': valid_values}
@@ -873,24 +876,29 @@ def main():
         print("\n=== Generating LiDAR depth maps ===")
         os.makedirs(os.path.join(output_dir, 'lidar_depth'), exist_ok=True)
 
-        for frame_idx, ts in enumerate(tqdm(selected_timestamps, desc="Depth maps")):
-            # Use the merged point cloud (or per-frame if available)
-            pts = merged_points
+        # Static cameras + merged point cloud: depth map is identical for all frames.
+        # Compute once per camera, then copy to each frame.
+        depth_cache = {}
+        for cam_name in args.cameras:
+            params = camera_params[cam_name]
+            cam_id = params['cam_id']
+            print(f"  Computing depth for camera {cam_name} (id={cam_id})...")
 
+            depth_data = generate_lidar_depth_map(
+                merged_points, params['K_new'], params['R_w2c'], params['t_w2c'],
+                img_width, img_height,
+                dilation_iters=args.depth_dilation_iters,
+            )
+            depth_cache[cam_id] = depth_data
+
+        # Write depth maps for all frames (same data, different filenames)
+        for frame_idx in range(len(selected_timestamps)):
             for cam_name in args.cameras:
-                params = camera_params[cam_name]
-                cam_id = params['cam_id']
-
-                depth_data = generate_lidar_depth_map(
-                    pts, params['K_new'], params['R_w2c'], params['t_w2c'],
-                    img_width, img_height,
-                    dilation_iters=args.depth_dilation_iters,
-                )
-
+                cam_id = camera_params[cam_name]['cam_id']
                 out_name = f'{frame_idx:06d}_{cam_id}'
                 np.save(
                     os.path.join(output_dir, 'lidar_depth', f'{out_name}.npy'),
-                    depth_data,
+                    depth_cache[cam_id],
                     allow_pickle=True,
                 )
 
