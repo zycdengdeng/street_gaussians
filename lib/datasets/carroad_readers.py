@@ -341,58 +341,73 @@ def _build_pointcloud(datadir, selected_frames, cameras, num_frames, intrinsics,
                 all_colors = all_colors / 255.0
 
             # Separate background and object points across all frames.
-            # Optimization: collect all unique object poses across all frames,
-            # use coarse distance pre-filter before expensive bbox check.
+            # Uses parallel processing with distance pre-filter for speed.
             print(f"Separating background/object points ({len(all_points)} pts, {num_frames} frames)...")
             global_obj_mask = np.zeros(all_points.shape[0], dtype=bool)
 
             # Pre-compute homogeneous points once
             pts_h = np.concatenate([all_points, np.ones((len(all_points), 1))], axis=-1)
 
+            # Collect all (track_id, t_info) jobs across all frames
+            jobs = []
             for fi in range(num_frames):
                 frame_tracklets = tracklets[fi]
-                n_valid = int(np.sum(frame_tracklets[:, 0] >= 0))
-                if n_valid == 0:
-                    continue
-                if fi % 10 == 0:
-                    print(f"  Frame {fi}/{num_frames}: {n_valid} objects")
-
                 for t_info in frame_tracklets:
                     track_id = int(t_info[0])
-                    if track_id < 0 or track_id not in object_info:
-                        continue
+                    if track_id >= 0 and track_id in object_info:
+                        jobs.append((track_id, t_info.copy()))
 
-                    obj_center = t_info[1:4]
-                    length = object_info[track_id]['length']
-                    width = object_info[track_id]['width']
-                    height = object_info[track_id]['height']
-                    max_half_diag = np.sqrt(length**2 + width**2 + height**2) / 2.0
+            print(f"  Total bbox checks: {len(jobs)} (across {num_frames} frames)")
 
-                    # Coarse distance filter: only check points near the object
-                    dists = np.linalg.norm(all_points - obj_center[None, :], axis=1)
-                    near_mask = dists < max_half_diag * 1.2
+            def _process_one_object(args_tuple):
+                """Check which points fall inside one object bbox. Returns (track_id, global_indices, local_pts, local_colors)."""
+                tid, t_info_local = args_tuple
+                obj_center = t_info_local[1:4]
+                length = object_info[tid]['length']
+                width = object_info[tid]['width']
+                height_val = object_info[tid]['height']
+                max_half_diag = np.sqrt(length**2 + width**2 + height_val**2) / 2.0
 
-                    if near_mask.sum() == 0:
-                        continue
+                # Coarse distance filter
+                dists = np.linalg.norm(all_points - obj_center[None, :], axis=1)
+                near_mask = dists < max_half_diag * 1.2
+                if near_mask.sum() == 0:
+                    return None
 
-                    obj_pose = np.eye(4)
-                    obj_pose[:3, :3] = quaternion_to_matrix_numpy(t_info[4:8])
-                    obj_pose[:3, 3] = obj_center
-                    world2local = np.linalg.inv(obj_pose)
+                obj_pose = np.eye(4)
+                obj_pose[:3, :3] = quaternion_to_matrix_numpy(t_info_local[4:8])
+                obj_pose[:3, 3] = obj_center
+                world2local = np.linalg.inv(obj_pose)
 
-                    pts_local = (pts_h[near_mask] @ world2local.T)[:, :3]
+                pts_local = (pts_h[near_mask] @ world2local.T)[:, :3]
+                bbox = [[-length / 2, -width / 2, -height_val / 2],
+                        [length / 2, width / 2, height_val / 2]]
+                corners = bbox_to_corner3d(bbox)
+                in_bbox = inbbox_points(pts_local, corners)
 
-                    bbox = [[-length / 2, -width / 2, -height / 2],
-                            [length / 2, width / 2, height / 2]]
-                    corners = bbox_to_corner3d(bbox)
-                    in_bbox = inbbox_points(pts_local, corners)
+                if not in_bbox.any():
+                    return None
 
-                    if in_bbox.any():
-                        # Map back to global indices
-                        near_indices = np.where(near_mask)[0]
-                        global_obj_mask[near_indices[in_bbox]] = True
-                        points_xyz_dict[f'obj_{track_id:03d}'].append(pts_local[in_bbox])
-                        points_rgb_dict[f'obj_{track_id:03d}'].append(all_colors[near_mask][in_bbox])
+                near_indices = np.where(near_mask)[0]
+                return (tid, near_indices[in_bbox], pts_local[in_bbox], all_colors[near_mask][in_bbox])
+
+            # Run in parallel using threads (numpy releases GIL)
+            from concurrent.futures import ThreadPoolExecutor
+            import multiprocessing
+            n_workers = min(len(jobs), max(multiprocessing.cpu_count() - 1, 1))
+            print(f"  Using {n_workers} threads...")
+
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                results = list(executor.map(_process_one_object, jobs))
+
+            # Merge results
+            for res in results:
+                if res is None:
+                    continue
+                tid, hit_indices, local_pts, local_colors = res
+                global_obj_mask[hit_indices] = True
+                points_xyz_dict[f'obj_{tid:03d}'].append(local_pts)
+                points_rgb_dict[f'obj_{tid:03d}'].append(local_colors)
 
             # Background = all non-object points
             points_xyz_dict['bkgd'].append(all_points[~global_obj_mask])
