@@ -477,6 +477,23 @@ def _build_pointcloud(datadir, selected_frames, cameras, num_frames, intrinsics,
 
     # Save point clouds
     initial_num_obj = 20000
+
+    # Determine voxel size: use config if provided, otherwise adapt to scene extent.
+    # For a 200m scene, 0.15m voxel is way too fine (~1.3M voxels/axis).
+    # Rule of thumb: target ~500k-1M background points.
+    voxel_size = cfg.data.get('voxel_size', None)
+    if voxel_size is None:
+        # Estimate scene extent from point cloud bounding box
+        all_bkgd = np.concatenate(points_xyz_dict['bkgd'], axis=0) if points_xyz_dict['bkgd'] else None
+        if all_bkgd is not None:
+            scene_diag = np.linalg.norm(all_bkgd.max(axis=0) - all_bkgd.min(axis=0))
+            # Scale voxel size: 0.15m for 50m scene, proportionally larger for bigger scenes
+            voxel_size = max(0.15, scene_diag / 350.0)
+        else:
+            voxel_size = 0.15
+    outlier_radius = max(voxel_size * 3.0, 0.5)
+    print(f"  Voxel downsample: voxel_size={voxel_size:.3f}m, outlier_radius={outlier_radius:.3f}m")
+
     for k, v_list in points_xyz_dict.items():
         if not v_list:
             continue
@@ -484,14 +501,15 @@ def _build_pointcloud(datadir, selected_frames, cameras, num_frames, intrinsics,
         rgb = np.concatenate(points_rgb_dict[k], axis=0).astype(np.float32)
 
         if k == 'bkgd':
-            # Voxel downsample + outlier removal
+            print(f"  Background before downsample: {len(xyz)} pts")
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(xyz)
             pcd.colors = o3d.utility.Vector3dVector(rgb)
-            pcd = pcd.voxel_down_sample(voxel_size=0.15)
-            pcd, _ = pcd.remove_radius_outlier(nb_points=10, radius=0.5)
+            pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+            pcd, _ = pcd.remove_radius_outlier(nb_points=10, radius=outlier_radius)
             xyz = np.asarray(pcd.points).astype(np.float32)
             rgb = np.asarray(pcd.colors).astype(np.float32)
+            print(f"  Background after downsample: {len(xyz)} pts")
             storePly(os.path.join(pointcloud_dir, 'points3D_lidar.ply'), xyz, rgb)
             storePly(os.path.join(pointcloud_dir, 'points3D_bkgd.ply'), xyz, rgb)
         else:

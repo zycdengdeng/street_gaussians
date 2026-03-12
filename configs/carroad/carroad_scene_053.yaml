@@ -23,10 +23,11 @@ data:
   white_background: false
   selected_frames: [0, -1]
   cameras: [0, 1, 2, 3]
-  extent: 50
+  extent: 100
   use_colmap: false
   filter_colmap: false
   box_scale: 1.5
+  # voxel_size: auto  # set explicitly (e.g. 0.5) to override auto-scaling
 
 model:
   gaussian:
