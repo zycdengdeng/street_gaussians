@@ -1,0 +1,100 @@
+# Car-Road Roadside Dataset - Street Gaussians Training Config
+#
+# Usage:
+#   1. Preprocess data:
+#      python script/carroad/prepare_carroad_data.py \
+#          --raw_dir /mnt/car_road_data_TianJin/<scene_name> \
+#          --output_dir ./data/carroad/<scene_name>
+#
+#   2. Train:
+#      python train.py --config configs/carroad/carroad_template.yaml
+#
+# Modify source_path, selected_frames, cameras as needed.
+
+task: carroad_exp
+source_path: ./data/carroad/scene_001
+exp_name: carroad_scene_001
+to_cuda: true
+
+data:
+  split_test: -1        # -1 = all frames for training, no test split
+  split_train: 1        # use every frame for training
+  type: CarRoad         # use our custom reader
+  white_background: false
+  selected_frames: [0, -1]    # [start, end], -1 = all frames
+  cameras: [0, 1, 2, 3]      # 4 pinhole cameras
+  extent: 50            # scene radius in meters (roadside scenes are large, ~130m camera spread)
+  use_colmap: false     # no COLMAP, we use LiDAR point cloud directly
+  filter_colmap: false
+  box_scale: 1.5        # scale bounding boxes for objects
+
+model:
+  gaussian:
+    sh_degree: 1
+    fourier_dim: 5        # for object motion modeling across frames
+    fourier_scale: 1.
+    flip_prob: 0.2        # symmetry prior for vehicles
+  nsg:
+    include_bkgd: true
+    include_obj: true     # set to false for static-only training
+    include_sky: false    # no sky cubemap for roadside (cameras point downward)
+    opt_track: true       # optimize object tracking poses
+  sky:
+    resolution: 1024
+    white_background: false
+
+train:
+  iterations: 30000
+  test_iterations: [7000, 15000, 30000]
+  save_iterations: [30000]
+  checkpoint_iterations: [30000]
+
+optim:
+  # Densification
+  prune_box_interval: 100
+  densification_interval: 100
+  densify_from_iter: 500
+  densify_grad_threshold_bkgd: 0.0006
+  densify_grad_abs_bkgd: true
+  densify_grad_threshold_obj: 0.0002
+  densify_grad_abs_obj: false
+  densify_grad_threshold: 0.0002
+  densify_until_iter: 20000
+
+  # Learning rates
+  feature_lr: 0.0025
+  max_screen_size: 20
+  min_opacity: 0.005
+  opacity_lr: 0.05
+  opacity_reset_interval: 3000
+  percent_big_ws: 0.1
+  percent_dense: 0.01
+  position_lr_delay_mult: 0.01
+  position_lr_final: 1.6e-06
+  position_lr_init: 0.00016
+  position_lr_max_steps: 30000
+  rotation_lr: 0.001
+  scaling_lr: 0.005
+  semantic_lr: 0.01
+
+  # Loss weights
+  lambda_dssim: 0.2
+  lambda_sky: 0.0         # no sky loss for roadside
+  lambda_sky_scale: []
+  lambda_mask: 0.1
+  lambda_reg: 0.1         # object regularization
+  lambda_depth_lidar: 0.1 # LiDAR depth supervision
+
+  # Tracking optimization
+  track_position_lr_delay_mult: 0.01
+  track_position_lr_init: 0.005
+  track_position_lr_final: 5.0e-5
+  track_position_max_steps: 30000
+  track_rotation_lr_delay_mult: 0.01
+  track_rotation_lr_init: 0.001
+  track_rotation_lr_final: 1.0e-5
+  track_rotation_max_steps: 30000
+
+render:
+  fps: 10
+  concat_cameras: [0, 1, 2, 3]

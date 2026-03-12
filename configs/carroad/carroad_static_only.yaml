@@ -1,0 +1,69 @@
+# Car-Road Roadside Dataset - Static-Only Config (for initial validation)
+#
+# Use this to verify the data pipeline works before enabling dynamic objects.
+# Trains only background Gaussians, no object tracking.
+
+task: carroad_exp
+source_path: ./data/carroad/scene_001
+exp_name: carroad_scene_001_static
+to_cuda: true
+
+data:
+  split_test: -1
+  split_train: 1
+  type: CarRoad
+  white_background: false
+  selected_frames: [0, -1]
+  cameras: [0, 1, 2, 3]
+  extent: 50
+  use_colmap: false
+  filter_colmap: false
+  box_scale: 1.0
+
+model:
+  gaussian:
+    sh_degree: 1
+    fourier_dim: 1
+    fourier_scale: 1.
+    flip_prob: 0.
+  nsg:
+    include_bkgd: true
+    include_obj: false    # no dynamic objects
+    include_sky: false
+    opt_track: false
+
+train:
+  iterations: 15000
+  test_iterations: [5000, 15000]
+  save_iterations: [15000]
+  checkpoint_iterations: [15000]
+
+optim:
+  densification_interval: 100
+  densify_from_iter: 500
+  densify_grad_threshold_bkgd: 0.0006
+  densify_grad_abs_bkgd: true
+  densify_grad_threshold: 0.0002
+  densify_until_iter: 12000
+  feature_lr: 0.0025
+  max_screen_size: 20
+  min_opacity: 0.005
+  opacity_lr: 0.05
+  opacity_reset_interval: 3000
+  percent_big_ws: 0.1
+  percent_dense: 0.01
+  position_lr_delay_mult: 0.01
+  position_lr_final: 1.6e-06
+  position_lr_init: 0.00016
+  position_lr_max_steps: 15000
+  rotation_lr: 0.001
+  scaling_lr: 0.005
+  lambda_dssim: 0.2
+  lambda_sky: 0.0
+  lambda_sky_scale: []
+  lambda_reg: 0.0
+  lambda_depth_lidar: 0.1
+
+render:
+  fps: 10
+  concat_cameras: [0, 1, 2, 3]

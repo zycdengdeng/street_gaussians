@@ -7,11 +7,13 @@ from lib.datasets.base_readers import storePly, SceneInfo
 from lib.datasets.colmap_readers import readColmapSceneInfo
 from lib.datasets.blender_readers import readNerfSyntheticInfo
 from lib.datasets.waymo_full_readers import readWaymoFullInfo
+from lib.datasets.carroad_readers import readCarRoadInfo
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "Waymo": readWaymoFullInfo,
+    "CarRoad": readCarRoadInfo,
 }
 
 class Dataset():
