@@ -506,6 +506,10 @@ def readCarRoadInfo(path, images='images', split_train=-1, split_test=-1, **kwar
         selected_frames = [start_frame, end_frame]
     else:
         start_frame, end_frame = selected_frames[0], selected_frames[1]
+        # Handle -1 sentinel meaning "last frame"
+        if end_frame < 0:
+            end_frame = num_frames_total - 1
+            selected_frames = [start_frame, end_frame]
     num_frames = end_frame - start_frame + 1
 
     # Load timestamps
