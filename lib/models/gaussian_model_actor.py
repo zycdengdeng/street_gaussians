@@ -202,6 +202,10 @@ class GaussianModelActor(GaussianModel):
         self.tensor_dict = dict()  
             
     def densify_and_prune(self, max_grad, min_opacity, prune_big_points):
+        # Skip if this actor has no gaussians left
+        if self.get_xyz.shape[0] == 0:
+            return self.scalar_dict, self.tensor_dict
+
         if not (self.random_initialization or self.deformable):
             max_grad = cfg.optim.get('densify_grad_threshold_obj', max_grad)
             if cfg.optim.get('densify_grad_abs_obj', False):
@@ -220,8 +224,8 @@ class GaussianModelActor(GaussianModel):
         self.densify_and_split(grads, max_grad, extent)
 
         # Prune points below opacity
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        
+        prune_mask = (self.get_opacity < min_opacity).squeeze(-1)
+
         if prune_big_points:
             # Prune big points in world space
             extent = self.extent
